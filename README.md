@@ -4,27 +4,29 @@ This script aims to __enumerate common Windows security misconfigurations__ whic
 
 I built on the amazing work done by [@harmj0y](https://twitter.com/harmj0y) and [@mattifestation](https://twitter.com/mattifestation) in [PowerUp](https://github.com/HarmJ0y/PowerUp). I added more checks and also tried to reduce the amount of false positives.
 
+
 ## Usage 
 
-Use the script from a PowerShell prompt.
+By default, the script runs only "quick-win" checks. To get extra information, use the option `-Extended`.
+
+From a PowerShell prompt:
 ```
-PS C:\Temp\> Set-ExecutionPolicy Bypass -Scope Process -Force 
+PS C:\Temp\> Set-ExecutionPolicy Bypass -Scope process -Force
 PS C:\Temp\> . .\Invoke-PrivescCheck.ps1; Invoke-PrivescCheck 
+PS C:\Temp\> . .\Invoke-PrivescCheck.ps1; Invoke-PrivescCheck -Extended
 ```
 
-Display output and write to a log file at the same time.
+From a PowerShell prompt + Log results to a file:
 ```
-PS C:\Temp\> . .\Invoke-PrivescCheck.ps1; Invoke-PrivescCheck | Tee-Object "C:\Temp\result.txt"
+PS C:\Temp\> Set-ExecutionPolicy Bypass -Scope process -Force
+PS C:\Temp\> . .\Invoke-PrivescCheck.ps1; Invoke-PrivescCheck | Tee-Object "result.txt"
+PS C:\Temp\> . .\Invoke-PrivescCheck.ps1; Invoke-PrivescCheck -Extended | Tee-Object "result.txt"
 ```
 
-Use the script from a CMD prompt.
+From a command prompt + Log results to a file:
 ```
 C:\Temp\>powershell -ep bypass -c ". .\Invoke-PrivescCheck.ps1; Invoke-PrivescCheck | Tee-Object result.txt"
-```
-
-Import the script from a web server.
-```
-C:\Temp\>powershell "IEX (New-Object Net.WebClient).DownloadString('http://LHOST:LPORT/Invoke-PrivescCheck.ps1'); Invoke-PrivescCheck" 
+C:\Temp\>powershell -ep bypass -c ". .\Invoke-PrivescCheck.ps1; Invoke-PrivescCheck -Extended | Tee-Object result.txt"
 ```
 
 
@@ -85,11 +87,6 @@ Invoke-ServicesPermissionsCheck - Enumerates the services the current user can m
 Invoke-ServicesPermissionsRegistryCheck - Enumerates services that can be modified by the current user in the registry
 Invoke-ServicesImagePermissionsCheck - Enumerates all the services that have a modifiable binary (or argument)
 Invoke-ServicesUnquotedPathCheck - Enumerates services with an unquoted path that can be exploited
-```
-
-### Dll Hijacking
-
-```
 Invoke-DllHijackingCheck - Checks whether any of the system path folders is modifiable
 Invoke-HijackableDllsCheck - Lists hijackable DLLs depending on the version of the OS
 ```
@@ -99,6 +96,7 @@ Invoke-HijackableDllsCheck - Lists hijackable DLLs depending on the version of t
 ```
 Invoke-InstalledProgramsCheck - Enumerates the applications that are not installed by default
 Invoke-ModifiableProgramsCheck - Enumerates applications which have a modifiable EXE of DLL file
+Invoke-ProgramDataCheck - Checks for modifiable files and folders under non default ProgramData folders
 Invoke-ApplicationsOnStartupCheck - Enumerates the applications which are run on startup
 Invoke-RunningProcessCheck - Enumerates the running processes
 Invoke-ScheduledTasksCheck - Enumrates scheduled tasks with a modifiable path
@@ -116,14 +114,20 @@ Invoke-VaultListCheck - Enumerates web credentials saved in the Credential Manag
 Invoke-GPPPasswordCheck - Lists Group Policy Preferences (GPP) containing a non-empty "cpassword" field
 ```
 
-### Registry
+### Hardening
 
 ```
 Invoke-UacCheck - Checks whether UAC (User Access Control) is enabled
 Invoke-LapsCheck - Checks whether LAPS (Local Admin Password Solution) is enabled
 Invoke-PowershellTranscriptionCheck - Checks whether PowerShell Transcription is configured/enabled
-Invoke-RegistryAlwaysInstallElevatedCheck - Checks whether the AlwaysInstallElevated key is set in the registry
 Invoke-LsaProtectionsCheck - Checks whether LSASS is running as a Protected Process (+ additional checks)
+Invoke-BitlockerCheck - Checks whether BitLocker is enabled on the system drive
+```
+
+### Configuration
+
+```
+Invoke-RegistryAlwaysInstallElevatedCheck - Checks whether the AlwaysInstallElevated key is set in the registry
 Invoke-WsusConfigCheck - Checks whether the WSUS is enabled and vulnerable (Wsuxploit)
 ```
 
@@ -135,10 +139,18 @@ Invoke-UdpEndpointsCheck - Enumerates unusual UDP endpoints on the local machine
 Invoke-WlanProfilesCheck - Enumerates the saved Wifi profiles and extract the cleartext key/passphrase when applicable
 ```
 
-### Misc
+### Updates 
 
 ```
 Invoke-WindowsUpdateCheck - Checks the last update time of the machine
+Invoke-HotfixCheck - Gets a list of installed updates and hotfixes
+Invoke-HotfixVulnCheck - Checks whether hotfixes have been installed in the past 31 days
+```
+
+### Misc
+
+```
+Invoke-EndpointProtectionCheck - Gets a list of security software products
 Invoke-SystemInfoCheck - Gets the name of the operating system and the full version string
 Invoke-LocalAdminGroupCheck - Enumerates the members of the default local admin group
 Invoke-UsersHomeFolderCheck - Enumerates the local user home folders
