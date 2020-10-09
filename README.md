@@ -12,21 +12,21 @@ By default, the script runs only "quick-win" checks. To get extra information, u
 From a PowerShell prompt:
 ```
 PS C:\Temp\> Set-ExecutionPolicy Bypass -Scope process -Force
-PS C:\Temp\> . .\Invoke-PrivescCheck.ps1; Invoke-PrivescCheck 
-PS C:\Temp\> . .\Invoke-PrivescCheck.ps1; Invoke-PrivescCheck -Extended
+PS C:\Temp\> . .\PrivescCheck.ps1; Invoke-PrivescCheck 
+PS C:\Temp\> . .\PrivescCheck.ps1; Invoke-PrivescCheck -Extended
 ```
 
 From a PowerShell prompt + Log results to a file:
 ```
 PS C:\Temp\> Set-ExecutionPolicy Bypass -Scope process -Force
-PS C:\Temp\> . .\Invoke-PrivescCheck.ps1; Invoke-PrivescCheck | Tee-Object "result.txt"
-PS C:\Temp\> . .\Invoke-PrivescCheck.ps1; Invoke-PrivescCheck -Extended | Tee-Object "result.txt"
+PS C:\Temp\> . .\PrivescCheck.ps1; Invoke-PrivescCheck | Tee-Object "result.txt"
+PS C:\Temp\> . .\PrivescCheck.ps1; Invoke-PrivescCheck -Extended | Tee-Object "result.txt"
 ```
 
 From a command prompt + Log results to a file:
 ```
-C:\Temp\>powershell -ep bypass -c ". .\Invoke-PrivescCheck.ps1; Invoke-PrivescCheck | Tee-Object result.txt"
-C:\Temp\>powershell -ep bypass -c ". .\Invoke-PrivescCheck.ps1; Invoke-PrivescCheck -Extended | Tee-Object result.txt"
+C:\Temp\>powershell -ep bypass -c ". .\PrivescCheck.ps1; Invoke-PrivescCheck | Tee-Object result.txt"
+C:\Temp\>powershell -ep bypass -c ". .\PrivescCheck.ps1; Invoke-PrivescCheck -Extended | Tee-Object result.txt"
 ```
 
 
@@ -67,6 +67,94 @@ You can get a looooot of information through WMI, that's great! But, if you face
 
 This wasn't that easy because newer version of PowerShell have very convenient functions or options. For example, the `Get-LocalGroup`function doesn't exist and `Get-ChildItem` doesn't have the `-Depth` option in PowerShellv2. So, you have to work your way around each one of these small but time-consuming issues. 
 
+## Implementing additional checks 
+
+Custom vulnerability checks can now be included dynamically. It's particularly interesting for blue teams if you want to use this script as a way to automatically assess the security of one or more machines.
+
+### Procedure
+
+1. Create the folder ̀`PrivescCheckPlugins` in the same location as the the script `PrivescCheck.ps1`.
+
+2. Create a CSV file `PrivescCheckPlugins.csv` in the folder `PrivescCheckPlugins`.
+
+The directory structure should now look like this:
+
+```txt
+.
+|__ PrivescCheck.ps1
+|__ PrivescCheckPlugins\
+    |__ Custom.ps1
+    |__ PrivescCheckPlugins.csv
+```
+
+3. Populate the `PrivescCheckPlugins.csv` using the following structure:
+
+```csv
+"Id", "File", "Command", "Params", "Category", "DisplayName", "Type", "Note", "Format", "Extended"
+"TEST_ID", "Custom.ps1", "Invoke-SomeCheck", "", "MyCategory", "Test Title", "Vuln", "Description of the test", "List", False
+```
+
+4. Implement your check (e.g.: `Invoke-SomeCheck`) in a dedicated script (e.g.: `Custom.ps1`)
+
+If a check returns at least one result, it will be interpreted as a vulnerability finding. Therefore, it the check is compliant, nothing shall be returned. 
+
+### Example
+
+Let's say that we want to check whether LLMNR is disabled.
+
+1. Edit the file `.\PrivescCheckPlugins\PrivescCheckPlugins.csv` like so:
+
+```csv
+"Id", "File", "Command", "Params", "Category", "DisplayName", "Type", "Note", "Format", "Extended"
+"HARDEN_LLMNR", "MyCustomChecks.ps1", "Invoke-LlmnrCheck", "", "Hardening", "LLMNR configuration", "Vuln", "LLNMR should be completely disabled to prevent domain name spoofing and NetNTLM relaying attacks on the local network.", False
+```
+
+2. Create the script `.\PrivescCheckPlugins\MyCustomChecks.ps1` and implement `Invoke-LlmnrCheck`.
+
+```powershell
+function Invoke-LlmnrCheck {
+
+    [CmdletBinding()] param ()
+
+    $RegistryKeyPath = "HKEY_LOCAL_MACHINE\SOFTWARE\Policies\Microsoft\Windows NT\DNSClient"
+    $RegistryValue = "EnableMulticast"
+
+    $Result = Get-Item -Path "Registry::$RegistryKeyPath" -ErrorAction SilentlyContinue -ErrorVariable ErrorGetItem 
+    if (-not $ErrorGetItem) {
+
+        $Result = Get-ItemProperty -Path "Registry::$RegistryKeyPath" | Select-Object -ExpandProperty $RegistryValue -ErrorAction SilentlyContinue -ErrorVariable ErrorGetItemProperty
+        if (-not $ErrorGetItemProperty) {
+
+            if ($Result -eq 0) {
+                $Compliant = $True
+                $Message = "LLMNR is disabled"
+            } else {
+                $Compliant = $False
+                $Message = "LLMNR is enabled" 
+            }
+            
+        } else {
+            $Compliant = $False 
+            $Message = "ERROR: Cannot find registry value"
+        }
+
+    } else {
+        $Compliant = $False 
+        $Message = "ERROR: Cannot find registry key"
+    }
+
+    if (-not $Compliant) {
+        $CheckResult = New-Object -TypeName PSObject
+        $CheckResult | Add-Member -MemberType "NoteProperty" -Name "Path" -Value $RegistryKeyPath
+        $CheckResult | Add-Member -MemberType "NoteProperty" -Name "Value" -Value $RegistryValue
+        $CheckResult | Add-Member -MemberType "NoteProperty" -Name "Data" -Value $Result
+        $CheckResult | Add-Member -MemberType "NoteProperty" -Name "Description" -Value $($Message)
+        $CheckResult
+    }
+}
+```
+
+3. Run the `PivescCheck.ps1` script without specifying any additional argument. If it finds the file `.\PrivescCheckPlugins\PrivescCheckPlugins.csv`, the custom checks will automatically be loaded and executed.
 
 ## Features 
 
@@ -98,8 +186,9 @@ Invoke-InstalledProgramsCheck - Enumerates the applications that are not install
 Invoke-ModifiableProgramsCheck - Enumerates applications which have a modifiable EXE of DLL file
 Invoke-ProgramDataCheck - Checks for modifiable files and folders under non default ProgramData folders
 Invoke-ApplicationsOnStartupCheck - Enumerates the applications which are run on startup
+Invoke-ApplicationsOnStartupVulnCheck - Enumerates startup applications that can be modified by the current user
 Invoke-RunningProcessCheck - Enumerates the running processes
-Invoke-ScheduledTasksCheck - Enumrates scheduled tasks with a modifiable path
+Invoke-ScheduledTasksCheck - Enumerates scheduled tasks with a modifiable path
 ```
 
 ### Credentials
@@ -112,6 +201,7 @@ Invoke-CredentialFilesCheck - Lists the Credential files that are stored in the 
 Invoke-VaultCredCheck - Enumerates credentials saved in the Credential Manager
 Invoke-VaultListCheck - Enumerates web credentials saved in the Credential Manager
 Invoke-GPPPasswordCheck - Lists Group Policy Preferences (GPP) containing a non-empty "cpassword" field
+Invoke-PowerShellHistoryCheck - Searches for interesting keywords in the PowerShell history of the current user
 ```
 
 ### Hardening
@@ -129,6 +219,7 @@ Invoke-BitlockerCheck - Checks whether BitLocker is enabled on the system drive
 ```
 Invoke-RegistryAlwaysInstallElevatedCheck - Checks whether the AlwaysInstallElevated key is set in the registry
 Invoke-WsusConfigCheck - Checks whether the WSUS is enabled and vulnerable (Wsuxploit)
+Invoke-SccmCacheFolderCheck - Checks whether the ccmcache folder is accessible
 ```
 
 ### Network

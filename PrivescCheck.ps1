@@ -19,6 +19,17 @@
 #Requires -Version 2
 
 # ----------------------------------------------------------------
+# BEGIN Global variables
+# ----------------------------------------------------------------
+$global:ScriptPath = $MyInvocation.MyCommand.Definition
+$global:CachedServiceList = New-Object -TypeName System.Collections.ArrayList
+$global:ResultArrayList = New-Object -TypeName System.Collections.ArrayList
+[string[]] $global:KeywordsOfInterest = "key", "passw", "secret", "pwd", "creds", "credential", "api"
+# ----------------------------------------------------------------
+# END Global variables
+# ----------------------------------------------------------------
+
+# ----------------------------------------------------------------
 # Win32 stuff  
 # ----------------------------------------------------------------
 #region Win32
@@ -364,7 +375,6 @@ try {
     Add-Type -MemberDefinition $CSharpSource -Name 'Win32' -Namespace 'PrivescCheck' -Language CSharp -CompilerParameters $CompilerParameters
 }
 #endregion Win32
-
 
 # ----------------------------------------------------------------
 # Helpers 
@@ -1236,8 +1246,6 @@ function Get-ServiceFromRegistry {
     }
 }
 
-$global:CachedServiceList = New-Object -TypeName System.Collections.ArrayList
-
 function Get-ServiceList {
     <#
     .SYNOPSIS
@@ -1302,7 +1310,7 @@ function Get-ServiceList {
         # populate the cache.
 
         $ServicesRegPath = "Registry::HKEY_LOCAL_MACHINE\SYSTEM\CurrentControlSet\Services" 
-        $RegAllServices = Get-ChildItem -Path $ServicesRegPath
+        $RegAllServices = Get-ChildItem -Path $ServicesRegPath -ErrorAction SilentlyContinue
 
         ForEach ($RegService in $RegAllServices) {
 
@@ -1991,28 +1999,19 @@ function Get-CredentialGuardStatus {
     $OsVersion = [System.Environment]::OSVersion.Version
 
     if ($OsVersion.Major -ge 10) {
+        
+        if (((Get-ComputerInfo).DeviceGuardSecurityServicesConfigured) -match 'CredentialGuard') {
 
-        $RegPath = "HKEY_LOCAL_MACHINE\System\CurrentControlSet\Control\LSA"
-        $Result = Get-ItemProperty -Path "Registry::$($RegPath)" -ErrorAction SilentlyContinue -ErrorVariable GetItemPropertyError 
-    
-        if (-not $GetItemPropertyError) {
-    
-            if (-not ($Null -eq $Result.LsaCfgFlags)) {
-    
-                if ($Result.LsaCfgFlags -eq 0) {
-                    $Status = $False 
-                    $Description = "Credential Guard is disabled"
-                } elseif ($Result.LsaCfgFlags -eq 1) {
-                    $Status = $True 
-                    $Description = "Credential Guard is enabled with UEFI lock"
-                } elseif ($Result.LsaCfgFlags -eq 2) {
-                    $Status = $True
-                    $Description = "Credential Guard is enabled without UEFI lock"
-                } 
-            } else {
-                $Status = $False 
-                $Description = "Credential Guard is not configured"
+            $Status = $False
+            $Description = "Credential Guard is configured but is not running"
+
+            if (((Get-ComputerInfo).DeviceGuardSecurityServicesRunning) -match 'CredentialGuard') {
+                $Status = $True
+                $Description = "Credential Guard is configured and running"
             }
+        } else {
+            $Status = $False
+            $Description = "Credential Guard is not configured"
         }
     } else {
         $Status = $False
@@ -2248,7 +2247,7 @@ function Get-UnattendSensitiveData {
 #region Checks 
 
 # ----------------------------------------------------------------
-# BEGIN REGISTRY SETTINGS   
+# BEGIN CONFIG   
 # ----------------------------------------------------------------
 function Invoke-UacCheck {
     <#
@@ -2551,9 +2550,9 @@ function Invoke-WsusConfigCheck {
     
     .DESCRIPTION
     
-    A system can be compromise if the updates are not requested using HTTPS but HTTP. If the URL of
-    the update server (WUServer) starts with HTTP and UseWUServer=1, then the update requests are
-    vulnerable to MITM attacks.
+    A system can be compromised if the updates are not requested using HTTPS but HTTP. If the URL
+    of the update server (WUServer) starts with HTTP and UseWUServer=1, then the update requests 
+    are vulnerable to MITM attacks.
     
     .EXAMPLE
     
@@ -2561,7 +2560,6 @@ function Invoke-WsusConfigCheck {
 
     WUServer     : http://acme-upd01.corp.internal.com:8535
     UseWUServer  : 1
-    IsVulnerable : True
     
     .LINK
 
@@ -2583,21 +2581,68 @@ function Invoke-WsusConfigCheck {
             $WusEnabled = $UseWUServerValue.UseWUServer
             
             if ($WusUrl -Like "http://*" -and $WusEnabled -eq 1) {
-                $IsVulnerable = $True
-            } else {
-                $IsVulnerable = $False
-            }
-
-            $Result = New-Object -TypeName PSObject
-            $Result | Add-Member -MemberType "NoteProperty" -Name "WUServer" -Value $WusUrl
-            $Result | Add-Member -MemberType "NoteProperty" -Name "UseWUServer" -Value $WusEnabled
-            $Result | Add-Member -MemberType "NoteProperty" -Name "IsVulnerable" -Value $IsVulnerable
-            $Result
+                
+                $Result = New-Object -TypeName PSObject
+                $Result | Add-Member -MemberType "NoteProperty" -Name "WUServer" -Value $WusUrl
+                $Result | Add-Member -MemberType "NoteProperty" -Name "UseWUServer" -Value $WusEnabled
+                $Result
+            } 
         }
     }
 }
+
+function Invoke-SccmCacheFolderCheck {
+    <#
+    .SYNOPSIS
+
+    Checks whether the ccmcache folder is accessible
+    
+    .DESCRIPTION
+
+    When SCCM is used to remotely install packages, a cache folder is created in the Windows 
+    directory: 'C:\Windows\ccmcache'. MSI packages contained in this folder may contain some
+    cleartext credentials. Therefore, normal users shouldn't be allowed to browse this 
+    directory.
+    
+    .EXAMPLE
+
+    PS C:\> Invoke-SccmCacheFolderCheck
+
+    Path         : C:\Windows\ccmcache
+    Description  : The CCMCache folder is accessible
+    
+    #>
+
+    [CmdletBinding()] param ()
+
+    $CcmCachePath = Join-Path -Path $env:windir -ChildPath "CCMCache"
+    if (Test-Path -Path $CcmCachePath) {
+
+        Get-ChildItem -Path $CcmCachePath -ErrorAction SilentlyContinue -ErrorVariable ErrorGetChildItem
+        if (-not $ErrorGetChildItem) {
+            $IsVulnerable = $True 
+            $Message = "The CCMCache folder is accessible"
+        } else {
+            $IsVulnerable = $False 
+            $Message = "The CCMCache folder exists but cannot be accessed"
+        }
+    } else {
+        $IsVulnerable = $False
+        $Message = "CCMCache folder not found"
+    }
+
+    Write-Verbose "$($Message)"
+
+    if ($IsVulnerable) {
+
+        $Result = New-Object -TypeName PSObject
+        $Result | Add-Member -MemberType "NoteProperty" -Name "Path" -Value $CcmCachePath
+        $Result | Add-Member -MemberType "NoteProperty" -Name "Description" -Value $Message
+        $Result
+    }
+}
 # ----------------------------------------------------------------
-# END REGISTRY SETTINGS   
+# END CONFIG   
 # ----------------------------------------------------------------
 
 
@@ -3681,14 +3726,14 @@ function Invoke-HotfixVulnCheck {
     <#
     .SYNOPSIS
 
-    Checks whether hotfixes were installed in the last 31 days.
+    Checks whether any hotfix has been installed in the last 31 days.
     
     .DESCRIPTION
 
     This script first lists all the installed hotfixes. If no result is returned, this will be
     reported as a finding. If at least one result is returned, the script will check the first 
     one (which corresponds to the latest hotfix). If it is more than 31 days old, it will be 
-    returned as a finding. 
+    returned as a finding.
     
     .EXAMPLE
 
@@ -3709,16 +3754,14 @@ function Invoke-HotfixVulnCheck {
 
         if ($TimeSpan.TotalDays -gt 31) {
             $Result = New-Object -TypeName PSObject
-            $Result | Add-Member -MemberType "NoteProperty" -Name "Result" -Value "The last hotfix was installed $($TimeSpan.TotalDays) days ago."
+            $Result | Add-Member -MemberType "NoteProperty" -Name "Result" -Value "The last hotfix was installed $([Math]::Floor($TimeSpan.TotalDays)) days ago."
             $Result
         } else {
             Write-Verbose "A hotfix was installed in the last 31 days."
         }
 
     } else {
-        $Result = New-Object -TypeName PSObject
-        $Result | Add-Member -MemberType "NoteProperty" -Name "Result" -Value "The hotfix history is empty."
-        $Result
+        Write-Verbose "The hotfix history is empty."
     }
 }
 
@@ -3780,39 +3823,39 @@ function Invoke-EndpointProtectionCheck {
     [CmdletBinding()] param()
 
     $Signatures = @{
-        "Cybereason" = "activeconsole,cramtray,crssvc,cybereason"
-        "AMSI" = "amsi.dll"
-        "Avast" = "avast"
-        "Avecto Defendpoint" = "avecto,defendpoint,pgeposervice,pgsystemtray,privilegeguard"
-        "Red Canary" = "canary"
-        "Carbon Black" = "carbon,cb.exe,logrhythm"
-        "Cisco AMP" = "ciscoamp"
-        "CounterTack" = "countertack"
-        "CrowdStrike" = "crowdstrike,csagent,csfalcon,csshell,ivanti,windowssensor"
-        "Cylance" = "cylance,cyoptics,cyupdate"
-        "Traps" = "cyvera,cyserver,cytray,PaloAltoNetworks,tda.exe,tdawork"
-        "Windows Defender" = "defender,msascuil,msmpeng,nissrv,securityhealthservice"
-        "Symantec Endpoint Protection" = "eectrl,semlaunchsvc,sepliveupdate,sisidsservice,sisipsservice,sisipsutil,smc.exe,smcgui,snac64,srtsp,symantec,symcorpui,symefasi"
-        "AppSense" = "emcoreservice,emsystem,watchdogagent"
-        "Endgame" = "endgame"
-        "FireEye" = "fireeye,mandiant,xagt"
-        "Forescout" = "forescout"
-        "eTrust EZ AV" = "groundling"
-        "ESET Endpoint Inspector" = "inspector"
-        "Kaspersky" = "kaspersky"
-        "McAfee" = "mcafee"
-        "Morphisec" = "morphisec"
-        "Trend Micro" = "ntrtscan,tmlisten,tmbmsrv,tmssclient,tmccsf,trend"
-        "Red Cloak" = "procwall,redcloak,cyclorama"
-        "Program Protector" = "protectorservice"
-        "IBM QRadar" = "qradar,wincollect"
-        "ForeScout SecureConnector" = "secureconnector"
-        "SentinelOne" = "sentinel"
-        "Sophos" = "sophos"
-        "Sysinternals Antivirus" = "sysinternal"
-        "Sysinternals Sysmon" = "sysmon"
-        "Lacuna" = "lacuna"
-        "Tanium Enforce" = "tanium,tpython"
+        "AMSI"                          = "amsi.dll"
+        "AppSense"                      = "emcoreservice,emsystem,watchdogagent"
+        "Avast"                         = "avast"
+        "Avecto Defendpoint"            = "avecto,defendpoint,pgeposervice,pgsystemtray,privilegeguard"
+        "Carbon Black"                  = "carbon,cb.exe,logrhythm"
+        "Cisco AMP"                     = "ciscoamp"
+        "CounterTack"                   = "countertack"
+        "CrowdStrike"                   = "crowdstrike,csagent,csfalcon,csshell,windowssensor"
+        "Cybereason"                    = "activeconsole,cramtray,crssvc,cybereason"
+        "Cylance"                       = "cylance,cyoptics,cyupdate"
+        "Endgame"                       = "endgame"
+        "ESET Endpoint Inspector"       = "inspector"
+        "eTrust EZ AV"                  = "groundling"
+        "FireEye"                       = "fireeye,mandiant,xagt"
+        "ForeScout"                     = "forescout,secureconnector"
+        "IBM QRadar"                    = "qradar,wincollect"
+        "Ivanti"                        = "ivanti"
+        "Kaspersky"                     = "kaspersky"
+        "Lacuna"                        = "lacuna"
+        "McAfee"                        = "mcafee"
+        "Morphisec"                     = "morphisec"
+        "Program Protector"             = "protectorservice"
+        "Red Canary"                    = "canary"
+        "Red Cloak"                     = "procwall,redcloak,cyclorama"
+        "SentinelOne"                   = "sentinel"
+        "Sophos"                        = "sophos"
+        "Symantec Endpoint Protection"  = "eectrl,semlaunchsvc,sepliveupdate,sisidsservice,sisipsservice,sisipsutil,smc.exe,smcgui,snac64,srtsp,symantec,symcorpui,symefasi"
+        "Sysinternals Antivirus"        = "sysinternal"
+        "Sysinternals Sysmon"           = "sysmon"
+        "Tanium Enforce"                = "tanium,tpython"
+        "Traps"                         = "cyvera,cyserver,cytray,PaloAltoNetworks,tda.exe,tdawork"
+        "Trend Micro"                   = "ntrtscan,tmlisten,tmbmsrv,tmssclient,tmccsf,trend"
+        "Windows Defender"              = "defender,msascuil,msmpeng,nissrv,securityhealthservice"
     }
 
     function Find-ProtectionSoftware {
@@ -3841,6 +3884,9 @@ function Invoke-EndpointProtectionCheck {
             }
         }
     }
+
+    # Need to store all the results into one arraylist so we can sort them on the product name.
+    $Results = New-Object System.Collections.ArrayList
     
     # Check DLLs loaded in the current process
     Get-Process -Id $PID -Module | ForEach-Object {
@@ -3854,7 +3900,7 @@ function Invoke-EndpointProtectionCheck {
                 $Result | Add-Member -MemberType "NoteProperty" -Name "ProductName" -Value "$($_.ProductName)"
                 $Result | Add-Member -MemberType "NoteProperty" -Name "Source" -Value "Loaded DLL"
                 $Result | Add-Member -MemberType "NoteProperty" -Name "Pattern" -Value "$($_.Pattern)"
-                $Result
+                [void] $Results.Add($Result)
             }
         }
     }
@@ -3868,7 +3914,7 @@ function Invoke-EndpointProtectionCheck {
             $Result | Add-Member -MemberType "NoteProperty" -Name "ProductName" -Value "$($_.ProductName)"
             $Result | Add-Member -MemberType "NoteProperty" -Name "Source" -Value "Running process"
             $Result | Add-Member -MemberType "NoteProperty" -Name "Pattern" -Value "$($_.Pattern)"
-            $Result
+            [void] $Results.Add($Result)
         }
     }
 
@@ -3881,7 +3927,7 @@ function Invoke-EndpointProtectionCheck {
             $Result | Add-Member -MemberType "NoteProperty" -Name "ProductName" -Value "$($_.ProductName)"
             $Result | Add-Member -MemberType "NoteProperty" -Name "Source" -Value "Installed application"
             $Result | Add-Member -MemberType "NoteProperty" -Name "Pattern" -Value "$($_.Pattern)"
-            $Result
+            [void] $Results.Add($Result)
         }
     }
 
@@ -3894,9 +3940,11 @@ function Invoke-EndpointProtectionCheck {
             $Result | Add-Member -MemberType "NoteProperty" -Name "ProductName" -Value "$($_.ProductName)"
             $Result | Add-Member -MemberType "NoteProperty" -Name "Source" -Value "Service"
             $Result | Add-Member -MemberType "NoteProperty" -Name "Pattern" -Value "$($_.Pattern)"
-            $Result
+            [void] $Results.Add($Result)
         }
     }
+
+    $Results | Sort-Object -Property ProductName,Source
 }
 
 # ----------------------------------------------------------------
@@ -4912,6 +4960,50 @@ function Invoke-GPPPasswordCheck {
         }
     }
 }
+
+function Invoke-PowerShellHistoryCheck {
+    <#
+    .SYNOPSIS
+
+    Searches for interesting keywords in the PowerShell history of the current user.
+    
+    .DESCRIPTION
+
+    PowerShell commands are saved in a file (ConsoleHost_history.txt), in a subdirectory of the 
+    current user's AppData folder. This script extracts the content of this file and also checks 
+    whether it contains some keywords such as "password".
+    
+    .EXAMPLE
+
+    PS C:\> Invoke-PowerShellHistoryCheck
+
+    Path          : C:\Users\lab-user\AppData\Roaming\Microsoft\Windows\PowerShell\PSReadLine\ConsoleHost_history.txt
+    CreationTime  : 11/11/2019 11:01:55
+    LastWriteTime : 04/10/2020 22:40:30
+    Lines         : 634
+    Matches       : 12
+    
+    #>
+
+    $HistoryFilePath = "$env:APPDATA\Microsoft\Windows\PowerShell\PSReadLine\ConsoleHost_history.txt"
+    $HistoryFileContent = Get-Content -Path $HistoryFilePath -ErrorAction SilentlyContinue -ErrorVariable ErrorGetContent
+
+    if (-not $ErrorGetContent) {
+
+        $HistoryCount = $HistoryFileContent.Count
+        $AllMatches = $HistoryFileContent | Select-String -Pattern $KeywordsOfInterest -AllMatches
+        $AllMatchesCount = $AllMatches.Count
+        $FileItem = Get-Item -Path $HistoryFilePath
+
+        $Item = New-Object -TypeName PSObject
+        $Item | Add-Member -MemberType "NoteProperty" -Name "Path" -Value $HistoryFilePath
+        $Item | Add-Member -MemberType "NoteProperty" -Name "CreationTime" -Value $FileItem.CreationTime
+        $Item | Add-Member -MemberType "NoteProperty" -Name "LastWriteTime" -Value $FileItem.LastWriteTime
+        $Item | Add-Member -MemberType "NoteProperty" -Name "Lines" -Value $HistoryCount
+        $Item | Add-Member -MemberType "NoteProperty" -Name "Matches" -Value $AllMatchesCount
+        $Item
+    }
+}
 # ----------------------------------------------------------------
 # END CREDENTIALS     
 # ----------------------------------------------------------------
@@ -5258,7 +5350,9 @@ function Invoke-ApplicationsOnStartupCheck {
 
     $Root = (Get-Item -Path $env:windir).PSDrive.Root
     
-    [string[]]$FileSystemPaths = "\Users\All Users\Start Menu\Programs\Startup", "\Users\$env:USERNAME\Start Menu\Programs\Startup"
+    # We want to check only startup applications that affect all users
+    # [string[]]$FileSystemPaths = "\Users\All Users\Start Menu\Programs\Startup", "\Users\$env:USERNAME\Start Menu\Programs\Startup"
+    [string[]]$FileSystemPaths = "\Users\All Users\Start Menu\Programs\Startup"
 
     $FileSystemPaths | ForEach-Object {
 
@@ -5295,6 +5389,31 @@ function Invoke-ApplicationsOnStartupCheck {
             }
         }
     }
+}
+
+function Invoke-ApplicationsOnStartupVulnCheck {
+    <#
+    .SYNOPSIS
+
+    Enumerates startup applications that can be modified by the current user
+
+    Author: @itm4n
+    License: BSD 3-Clause
+    
+    .DESCRIPTION
+
+    Some applications can be set as "startup" applications for all users. If a user can modify one
+    of these apps, they would potentially be able to run arbitrary code in the context of other 
+    users. Therefore, low-privileged users should not be able to modify the files used by such
+    application.
+    
+    .EXAMPLE
+
+    An example
+    
+    #>
+
+    Invoke-ApplicationsOnStartupCheck | Where-Object { $_.IsModifiable }
 }
 
 function Invoke-ScheduledTasksCheck {
@@ -6298,8 +6417,6 @@ function Write-CheckBanner {
     $Result
 }
 
-$global:ResultArrayList = New-Object -TypeName System.Collections.ArrayList
-
 function Invoke-Check {
 
     [CmdletBinding()] param(
@@ -6308,6 +6425,14 @@ function Invoke-Check {
 
     $Result = Invoke-Expression -Command "$($Check.Command) $($Check.Params)"
     $Check | Add-Member -MemberType "NoteProperty" -Name "ResultRaw" -Value $Result
+    $Check | Add-Member -MemberType "NoteProperty" -Name "ResultRawString" -Value $($Result | Format-List | Out-String)
+    if ($($_.Type -Like "vuln")) {
+        if ($Result) {
+            $Check | Add-Member -MemberType "NoteProperty" -Name "Compliance" -Value $False
+        } else {
+            $Check | Add-Member -MemberType "NoteProperty" -Name "Compliance" -Value $True
+        }
+    }
     [void] $ResultArrayList.Add($Check)
     $Check.ResultRaw
 }
@@ -6338,6 +6463,18 @@ function Invoke-PrivescCheck {
     .PARAMETER Force
 
     Ignore warnings.
+
+    .PARAMETER Silent
+
+    Don't output test results, show only the final vulnerability report.
+
+    .PARAMETER OutFile
+
+    Path of an output file.
+
+    .PARAMETER OutFormat
+
+    Select the format of the output file (e.g.: HTML or CSV).
     
     .EXAMPLE
 
@@ -6356,7 +6493,10 @@ function Invoke-PrivescCheck {
 
     [CmdletBinding()] param(
         [switch]$Extended = $False,
-        [switch]$Force = $False
+        [switch]$Force = $False,
+        [switch]$Silent = $False,
+        [string]$OutFile,
+        [ValidateSet("HTML", "CSV")][string]$OutFormat
     )
 
     ### This check was taken from PowerUp.ps1
@@ -6372,55 +6512,89 @@ function Invoke-PrivescCheck {
     }
 
     $AllChecksCsv = @"
-"Id", "Command", "Params", "Category", "DisplayName", "Type", "Note", "Format", "Extended"
-"USER_USER", "Invoke-UserCheck", "", "User", "whoami", "Info", "Gets the name and the SID of the current user.", "Table", True
-"USER_GROUPS", "Invoke-UserGroupsCheck", "", "User", "whoami /groups", "Info", "Gets the non-default groups the current user belongs to.", "Table", True
-"USER_PRIVILEGES", "Invoke-UserPrivilegesCheck", "", "User", "whoami /priv", "Vuln", "Gets the privileges of the current user which can be leveraged for elevation of privilege.", "Table", False
-"USER_ENV", "Invoke-UserEnvCheck", "", "User", "Environment Variables", "Info", "Checks environment variable for sensitive data.", "Table", False
-"SERVICE_INSTALLED", "Invoke-InstalledServicesCheck", "", "Services", "Non-default Services", "Info", "Checks for third-party services.", "List", False
-"SERVICE_PERMISSIONS", "Invoke-ServicesPermissionsCheck", "", "Services", "Permissions - SCM", "Vuln", "Checks for services which are modifiable through the Service Control Manager (sc.exe config VulnService binpath= C:\Temp\evil.exe).", "List", False
-"SERVICE_PERMISSIONS_REGISTRY", "Invoke-ServicesPermissionsRegistryCheck", "", "Services", "Permissions - Registry", "Vuln", "Checks for services which are modifiable through the registry (reg.exe add HKLM\[...]\Services\VulnService /v ImagePath /d C:\Temp\evil.exe /f).", "List", False
-"SERVICE_IMAGE_PERMISSIONS", "Invoke-ServicesImagePermissionsCheck", "", "Services", "Binary Permissions", "Vuln", "Checks for modifiable service binaries (copy C:\Temp\evil.exe C:\APPS\MyCustomApp\service.exe).", "List", False
-"SERVICE_UNQUOTED_PATH", "Invoke-ServicesUnquotedPathCheck", "", "Services", "Unquoted Paths", "Vuln", "Checks for service unquoted image paths (C:\APPS\Foo Bar\service.exe -> copy C:\Temp\evil.exe C:\APPS\Foo.exe).", "List", False
-"SERVICE_DLL_HIJACKING", "Invoke-DllHijackingCheck", "", "Services", "System's %PATH%", "Vuln", "Checks for system %PATH% folders configured with weak permissions.", "List", False
-"SERVICE_HIJACKABLE_DLL", "Invoke-HijackableDllsCheck", "", "Services", "Hijackable DLLs", "Info", "Lists known hijackable DLLs on this system.", "List", False
-"APP_INSTALLED", "Invoke-InstalledProgramsCheck", "", "Applications", "Non-default Applications", "Info", "Lists non-default and third-party applications.", "Table", True
-"APP_MODIFIABLE", "Invoke-ModifiableProgramsCheck", "", "Applications", "Modifiable Applications", "Vuln", "Checks for non-default applications with a modifiable executable.", "Table", False
-"APP_PROGRAMDATA", "Invoke-ProgramDataCheck", "", "Applications", "ProgramData folders/files", "Info", "Checks for modifiable files and folders under non default ProgramData folders.", "List", True
-"APP_STARTUP", "Invoke-ApplicationsOnStartupCheck", "", "Applications", "Programs Run on Startup", "Info", "Lists applications which are run on startup.", "List", True
-"APP_SCHTASKS", "Invoke-ScheduledTasksCheck", "-Filtered", "Applications", "Scheduled Tasks", "Vuln", "Checks for scheduled tasks with a modifiable executable.", "List", True
-"APP_PROCESSES", "Invoke-RunningProcessCheck", "", "Applications", "Running Processes", "Info", "Lists processes which are not owned by the current user. Common processes such as 'svchost.exe' are filtered out.", "Table", True
-"CREDS_SAM_BKP", "Invoke-SamBackupFilesCheck", "", "Credentials", "SAM/SYSTEM Backup Files", "Vuln", "Checks for readable backups of the SAM/SYSTEM files.", "List", False
-"CREDS_UNATTENDED", "Invoke-UnattendFilesCheck", "", "Credentials", "Unattended Files", "Vuln", "Checks for Unattend files containing cleartext passwords.", "List", False
-"CREDS_WINLOGON", "Invoke-WinlogonCheck", "", "Credentials", "WinLogon", "Vuln", "Checks for cleartext passwords in the Winlogon registry key. Empty passwords are filtered out.", "List", False
-"CREDS_CRED_FILES", "Invoke-CredentialFilesCheck", "", "Credentials", "Credential Files", "Info", "Lists credential files in the current user's HOME folder.", "List", True
-"CREDS_VAULT_CRED", "Invoke-VaultCredCheck", "", "Credentials", "Credential Manager", "Info", "Checks for saved credentials in Windows Vault.", "List", False
-"CREDS_VAULT_LIST", "Invoke-VaultListCheck", "", "Credentials", "Credential Manager (web)", "Info", "Checks for saved web credentials in Windows Vault.", "List", False
-"CREDS_GPP", "Invoke-GPPPasswordCheck", "", "Credentials", "GPP Passwords", "Vuln", "Checks for cached Group Policy Preferences containing a 'cpassword' field.", "List", False
-"HARDEN_UAC", "Invoke-UacCheck", "", "Hardening", "UAC Settings", "Info", "Checks User Access Control (UAC) configuration.", "List", True
-"HARDEN_LSA", "Invoke-LsaProtectionsCheck", "", "Hardening", "LSA protections", "Info", "Checks whether 'lsass' runs as a Protected Process Light or if Credential Guard is enabled.", "Table", True
-"HARDEN_LAPS", "Invoke-LapsCheck", "", "Hardening", "LAPS Settings", "Info", "Checks whether LAPS is configured and enabled.", "List", True
-"HARDEN_PS_TRANSCRIPT", "Invoke-PowershellTranscriptionCheck", "", "Hardening", "PowerShell Transcription", "Info", "Checks whether PowerShell Transcription is configured and enabled.", "List", True
-"HARDEN_BITLOCKER", "Invoke-BitlockerCheck", "", "Hardening", "BitLocker", "Vuln", "Checks whether BitLocker is enabled on the system drive. This check relies on a registry value and might be unreliable.", "List", False
-"CONFIG_MSI", "Invoke-RegistryAlwaysInstallElevatedCheck", "", "Config", "AlwaysInstallElevated", "Vuln", "Checks whether the 'AlwaysInstallElevated' registry key is configured and enabled.", "List", False
-"CONFIG_WSUS", "Invoke-WsusConfigCheck", "", "Config", "WSUS Configuration", "Vuln", "Checks whether WSUS is configured, enabled and vulnerable to the 'Wsuxploit' MITM attack (https://github.com/pimps/wsuxploit).", "List", False
-"NET_TCP_ENDPOINTS", "Invoke-TcpEndpointsCheck", "", "Network", "TCP Endpoints", "Info", "Lists all TCP endpoints along with the corresponding process.", "Table", True
-"NET_UDP_ENDPOINTS", "Invoke-UdpEndpointsCheck", "", "Network", "UDP Endpoints", "Info", "Lists all UDP endpoints along with the corresponding process. DNS is filtered out.", "Table", True
-"NET_WLAN", "Invoke-WlanProfilesCheck", "", "Network", "Saved Wifi Profiles", "Info", "Checks for WEP/WPA-PSK keys and passphrases in saved Wifi profiles.", "List", True
-"UPDATE_HISTORY", "Invoke-WindowsUpdateCheck", "", "Updates", "Last Windows Update Date", "Info", "Gets Windows update history. A system which hasn't been updated in the last 30 days is potentially vulnerable.", "Table", True
-"UPDATE_HOTFIX", "Invoke-HotfixCheck", "", "Updates", "Installed Updates and Hotfixes", "Info", "Gets the hotfixes that are installed on the computer.", "Table", True
-"UPDATE_HOTFIX_VULN", "Invoke-HotfixVulnCheck", "", "Updates", "System up to date?", "Vuln", "Checks whether hotfixes have been installed in the past 31 days.", "List", False
-"MISC_AVEDR", "Invoke-EndpointProtectionCheck", "", "Misc", "Endpoint Protection", "Info", "Checks for installed security products (AV, EDR). This check is based on keyword matching (loaded DLLs, running processes, installed applications and registered services).", "Table", True
-"MISC_SYSINFO", "Invoke-SystemInfoCheck", "", "Misc", "OS Version", "Info", "Gets the detailed version number of the OS. If we can't get the update history, this might be useful.", "Table", True
-"MISC_ADMINS", "Invoke-LocalAdminGroupCheck", "", "Misc", "Local Admin Group", "Info", "Lists the members of the local 'Administrators' group.", "Table", True
-"MISC_HOMES", "Invoke-UsersHomeFolderCheck", "", "Misc", "User Home Folders", "Info", "Lists HOME folders and checks for write access.", "Table", True
-"MISC_MACHINE_ROLE", "Invoke-MachineRoleCheck", "", "Misc", "Machine Role", "Info", "Gets the machine's role: Workstation, Server, Domain Controller.", "Table", True
-"MISC_STARTUP_EVENTS", "Invoke-SystemStartupHistoryCheck", "", "Misc", "System Startup History", "Info", "Gets the startup history. Some exploits require a reboot so this can be useful to know.", "Table", True
-"MISC_STARTUP_LAST", "Invoke-SystemStartupCheck", "", "Misc", "Last System Startup", "Info", "Gets the last system startup date based on the current tick count (potentially unreliable).", "Table", True
-"MISC_DRIVES", "Invoke-SystemDrivesCheck", "", "Misc", "Filesystem Drives", "Info", "Lists partitions, removable storage and mapped network shares.", "Table", True
+"Id", "File", "Command", "Params", "Category", "DisplayName", "Type", "Note", "Format", "Extended"
+"USER_USER", "", "Invoke-UserCheck", "", "User", "whoami", "Info", "Gets the name and the SID of the current user.", "Table", True
+"USER_GROUPS", "", "Invoke-UserGroupsCheck", "", "User", "whoami /groups", "Info", "Gets the non-default groups the current user belongs to.", "Table", True
+"USER_PRIVILEGES", "", "Invoke-UserPrivilegesCheck", "", "User", "Privileges", "Vuln", "Gets the privileges of the current user which can be leveraged for elevation of privilege.", "Table", False
+"USER_ENV", "", "Invoke-UserEnvCheck", "", "User", "Environment Variables", "Info", "Checks environment variable for sensitive data.", "Table", False
+"SERVICE_INSTALLED", "", "Invoke-InstalledServicesCheck", "", "Services", "Non-default Services", "Info", "Checks for third-party services.", "List", False
+"SERVICE_PERMISSIONS", "", "Invoke-ServicesPermissionsCheck", "", "Services", "Permissions - SCM", "Vuln", "Checks for services which are modifiable through the Service Control Manager (sc.exe config VulnService binpath= C:\Temp\evil.exe).", "List", False
+"SERVICE_PERMISSIONS_REGISTRY", "", "Invoke-ServicesPermissionsRegistryCheck", "", "Services", "Permissions - Registry", "Vuln", "Checks for services which are modifiable through the registry (reg.exe add HKLM\[...]\Services\VulnService /v ImagePath /d C:\Temp\evil.exe /f).", "List", False
+"SERVICE_IMAGE_PERMISSIONS", "", "Invoke-ServicesImagePermissionsCheck", "", "Services", "Binary Permissions", "Vuln", "Checks for modifiable service binaries (copy C:\Temp\evil.exe C:\APPS\MyCustomApp\service.exe).", "List", False
+"SERVICE_UNQUOTED_PATH", "", "Invoke-ServicesUnquotedPathCheck", "", "Services", "Unquoted Paths", "Vuln", "Checks for service unquoted image paths (C:\APPS\Foo Bar\service.exe -> copy C:\Temp\evil.exe C:\APPS\Foo.exe).", "List", False
+"SERVICE_DLL_HIJACKING", "", "Invoke-DllHijackingCheck", "", "Services", "System's %PATH%", "Vuln", "Checks for system %PATH% folders configured with weak permissions.", "List", False
+"SERVICE_HIJACKABLE_DLL", "", "Invoke-HijackableDllsCheck", "", "Services", "Hijackable DLLs", "Info", "Lists known hijackable DLLs on this system.", "List", False
+"APP_INSTALLED", "", "Invoke-InstalledProgramsCheck", "", "Apps", "Non-default Apps", "Info", "Lists non-default and third-party applications.", "Table", True
+"APP_MODIFIABLE", "", "Invoke-ModifiableProgramsCheck", "", "Apps", "Modifiable Apps", "Vuln", "Checks for non-default applications with a modifiable executable.", "Table", False
+"APP_PROGRAMDATA", "", "Invoke-ProgramDataCheck", "", "Apps", "ProgramData folders/files", "Info", "Checks for modifiable files and folders under non default ProgramData folders.", "List", True
+"APP_STARTUP", "", "Invoke-ApplicationsOnStartupCheck", "", "Apps", "Apps Run on Startup", "Info", "Lists applications which are run on startup.", "List", True
+"APP_STARTUP_VULN", "", "Invoke-ApplicationsOnStartupVulnCheck", "", "Apps", "Modifiable Apps Run on Startup", "Vuln", "Lists startup applications that can be modified by the current user.", "List", False
+"APP_SCHTASKS", "", "Invoke-ScheduledTasksCheck", "-Filtered", "Apps", "Scheduled Tasks", "Vuln", "Checks for scheduled tasks with a modifiable executable.", "List", True
+"APP_PROCESSES", "", "Invoke-RunningProcessCheck", "", "Apps", "Running Processes", "Info", "Lists processes which are not owned by the current user. Common processes such as 'svchost.exe' are filtered out.", "Table", True
+"CREDS_SAM_BKP", "", "Invoke-SamBackupFilesCheck", "", "Creds", "SAM/SYSTEM Backup Files", "Vuln", "Checks for readable backups of the SAM/SYSTEM files.", "List", False
+"CREDS_UNATTENDED", "", "Invoke-UnattendFilesCheck", "", "Creds", "Unattended Files", "Vuln", "Checks for Unattend files containing cleartext passwords.", "List", False
+"CREDS_WINLOGON", "", "Invoke-WinlogonCheck", "", "Creds", "WinLogon", "Vuln", "Checks for cleartext passwords in the Winlogon registry key. Empty passwords are filtered out.", "List", False
+"CREDS_CRED_FILES", "", "Invoke-CredentialFilesCheck", "", "Creds", "Credential Files", "Info", "Lists credential files in the current user's HOME folder.", "List", True
+"CREDS_VAULT_CRED", "", "Invoke-VaultCredCheck", "", "Creds", "Credential Manager", "Info", "Checks for saved credentials in Windows Vault.", "List", False
+"CREDS_VAULT_LIST", "", "Invoke-VaultListCheck", "", "Creds", "Credential Manager (web)", "Info", "Checks for saved web credentials in Windows Vault.", "List", False
+"CREDS_GPP", "", "Invoke-GPPPasswordCheck", "", "Creds", "GPP Passwords", "Vuln", "Checks for cached Group Policy Preferences containing a 'cpassword' field.", "List", False
+"CREDS_PS_HIST", "", "Invoke-PowerShellHistoryCheck", "", "Creds", "PowerShell History", "Info", "Checks for saved credentials in the PowerShell history file of the current user.", "List", True
+"HARDEN_UAC", "", "Invoke-UacCheck", "", "Hardening", "UAC Settings", "Info", "Checks User Access Control (UAC) configuration.", "List", True
+"HARDEN_LSA", "", "Invoke-LsaProtectionsCheck", "", "Hardening", "LSA protections", "Info", "Checks whether 'lsass' runs as a Protected Process Light or if Credential Guard is enabled.", "Table", True
+"HARDEN_LAPS", "", "Invoke-LapsCheck", "", "Hardening", "LAPS Settings", "Info", "Checks whether LAPS is configured and enabled.", "List", True
+"HARDEN_PS_TRANSCRIPT", "", "Invoke-PowershellTranscriptionCheck", "", "Hardening", "PowerShell Transcription", "Info", "Checks whether PowerShell Transcription is configured and enabled.", "List", True
+"HARDEN_BITLOCKER", "", "Invoke-BitlockerCheck", "", "Hardening", "BitLocker", "Vuln", "Checks whether BitLocker is enabled on the system drive. This check relies on a registry value and might be unreliable.", "List", False
+"CONFIG_MSI", "", "Invoke-RegistryAlwaysInstallElevatedCheck", "", "Config", "AlwaysInstallElevated", "Vuln", "Checks whether the 'AlwaysInstallElevated' registry key is configured and enabled.", "List", False
+"CONFIG_WSUS", "", "Invoke-WsusConfigCheck", "", "Config", "WSUS Configuration", "Vuln", "Checks whether WSUS is configured, enabled and vulnerable to the 'Wsuxploit' MITM attack (https://github.com/pimps/wsuxploit).", "List", False
+"CONFIG_SCCM", "", "Invoke-SccmCacheFolderCheck", "", "Config", "SCCM Cache Folder", "Vuln", "Checks whether the current user can browse the SCCM cache folder. If so, hardcoded credentials might be extracted from MSI package files.", "List", False
+"NET_TCP_ENDPOINTS", "", "Invoke-TcpEndpointsCheck", "", "Network", "TCP Endpoints", "Info", "Lists all TCP endpoints along with the corresponding process.", "Table", True
+"NET_UDP_ENDPOINTS", "", "Invoke-UdpEndpointsCheck", "", "Network", "UDP Endpoints", "Info", "Lists all UDP endpoints along with the corresponding process. DNS is filtered out.", "Table", True
+"NET_WLAN", "", "Invoke-WlanProfilesCheck", "", "Network", "Saved Wifi Profiles", "Info", "Checks for WEP/WPA-PSK keys and passphrases in saved Wifi profiles.", "List", True
+"UPDATE_HISTORY", "", "Invoke-WindowsUpdateCheck", "", "Updates", "Last Windows Update Date", "Info", "Gets Windows update history. A system which hasn't been updated in the last 30 days is potentially vulnerable.", "Table", True
+"UPDATE_HOTFIX", "", "Invoke-HotfixCheck", "", "Updates", "Installed Updates and Hotfixes", "Info", "Gets the hotfixes that are installed on the computer.", "Table", True
+"UPDATE_HOTFIX_VULN", "", "Invoke-HotfixVulnCheck", "", "Updates", "System up to date?", "Vuln", "Checks whether hotfixes have been installed in the past 31 days.", "List", False
+"MISC_AVEDR", "", "Invoke-EndpointProtectionCheck", "", "Misc", "Endpoint Protection", "Info", "Checks for installed security products (AV, EDR). This check is based on keyword matching (loaded DLLs, running processes, installed applications and registered services).", "Table", True
+"MISC_SYSINFO", "", "Invoke-SystemInfoCheck", "", "Misc", "OS Version", "Info", "Gets the detailed version number of the OS. If we can't get the update history, this might be useful.", "Table", True
+"MISC_ADMINS", "", "Invoke-LocalAdminGroupCheck", "", "Misc", "Local Admin Group", "Info", "Lists the members of the local 'Administrators' group.", "Table", True
+"MISC_HOMES", "", "Invoke-UsersHomeFolderCheck", "", "Misc", "User Home Folders", "Info", "Lists HOME folders and checks for write access.", "Table", True
+"MISC_MACHINE_ROLE", "", "Invoke-MachineRoleCheck", "", "Misc", "Machine Role", "Info", "Gets the machine's role: Workstation, Server, Domain Controller.", "Table", True
+"MISC_STARTUP_EVENTS", "", "Invoke-SystemStartupHistoryCheck", "", "Misc", "System Startup History", "Info", "Gets the startup history. Some exploits require a reboot so this can be useful to know.", "Table", True
+"MISC_STARTUP_LAST", "", "Invoke-SystemStartupCheck", "", "Misc", "Last System Startup", "Info", "Gets the last system startup date based on the current tick count (potentially unreliable).", "Table", True
+"MISC_DRIVES", "", "Invoke-SystemDrivesCheck", "", "Misc", "Filesystem Drives", "Info", "Lists partitions, removable storage and mapped network shares.", "Table", True
 "@
 
+    $AllChecks = New-Object System.Collections.ArrayList
+
+    # Load default checks
     $AllChecksCsv | ConvertFrom-Csv | ForEach-Object {
+        [void] $AllChecks.Add($_)
+    }
+
+    # Load plugins if any
+    Write-Verbose "Script path: $($ScriptPath)"
+    $ScriptLocation = Split-Path -Parent $ScriptPath -ErrorAction SilentlyContinue -ErrorVariable ErrorSplitPath
+    if (-not $ErrorSplitPath) {
+        $PrivescCheckPluginsCsvPath = Join-Path $ScriptLocation -ChildPath "\PrivescCheckPlugins\PrivescCheckPlugins.csv"
+        Write-Verbose "Plugin definition file: '$($PrivescCheckPluginsCsvPath)'"
+        if (Test-Path -Path $PrivescCheckPluginsCsvPath) {
+            Write-Verbose "Found plugin definition file: $($PrivescCheckPluginsCsvPath)"
+            Get-Content -Path $PrivescCheckPluginsCsvPath -ErrorAction Stop | Out-String | ConvertFrom-Csv | ForEach-Object {
+                [void] $AllChecks.Add($_)
+            }
+        } else {
+            Write-Verbose "No plugin definition file found."
+        }
+    }
+    
+    # Load plugin scripts if any
+    $AllChecks | Where-Object { $_.File -ne "" } | Select-Object -ExpandProperty File | Sort-Object -Unique | ForEach-Object {
+        Write-Verbose "Plugin required: $($_)"
+        $FilePath = Join-Path $ScriptLocation -ChildPath "\PrivescCheckPlugins\$($_)"
+        Get-Content -Path $FilePath -ErrorAction Stop | Out-String | Invoke-Expression
+    }
+
+    $CheckCounter = 0
+    $AllChecks | ForEach-Object {
 
         $ExtendedCheck = [System.Convert]::ToBoolean($_.Extended)
 
@@ -6428,33 +6602,157 @@ function Invoke-PrivescCheck {
         # marked as an "extended" one.
         if ($Extended -or ((-not $Extended) -and (-not $ExtendedCheck))) {
 
-            Write-CheckBanner -Check $_
-            $Results = Invoke-Check -Check $_
-    
-            if ($Results) {
-    
-                "[*] Found $(([object[]]$Results).Length) result(s)."
-    
-                if ($_.Format -eq "Table") {
-                    $Results | Format-Table -AutoSize
-                } elseif ($_.Format -eq "List") {
-                    $Results | Format-List
-                }
-                
+            if ($Silent) {
+                $CheckCounter += 1
+                $Percentage = ($CheckCounter * 100) / ($AllChecks.Count)
+                Write-Progress -Activity "$($_.Category.ToUpper()) > $($_.DisplayName)" -PercentComplete $Percentage
+                $Results = Invoke-Check -Check $_
             } else {
-                "[!] Nothing found."
+                Write-CheckBanner -Check $_
+                $Results = Invoke-Check -Check $_
+        
+                if ($Results) {
+        
+                    "[*] Found $(([object[]]$Results).Length) result(s)."
+        
+                    if ($_.Format -eq "Table") {
+                        $Results | Format-Table -AutoSize
+                    } elseif ($_.Format -eq "List") {
+                        $Results | Format-List
+                    }
+                    
+                } else {
+                    "[!] Nothing found."
+                }
+        
+                "`r`n"
             }
-    
-            "`r`n"
         }
     }
 
     Invoke-AnalyzeResults 
 
-    if ((-not $Extended) -and (-not $Force)) {
+    if ($OutFile) {
+        if ($OutFormat -eq "HTML") {
+            Write-HtmlReport -AllResults $ResultArrayList | Out-File $OutFile
+        } elseif ($OutFormat -eq "CSV") {
+            Write-CsvReport -AllResults $ResultArrayList | Out-File $OutFile
+        }
+    }
+
+    if ((-not $Extended) -and (-not $Force) -and (-not $Silent)) {
 
         Write-Host -ForegroundColor Yellow "`r`nTo get more info, run this script with the flag '-Extended'.`r`n"
     }
+}
+
+function Write-CsvReport {
+
+    [CmdletBinding()] param(
+        [object[]]$AllResults
+    )
+    
+    $AllResults | Where-Object { $_.Type -like "vuln" } | Sort-Object -Property Category | Select-Object Category,DisplayName,Note,Compliance,ResultRawString | ConvertTo-Csv -NoTypeInformation
+}
+
+function Write-HtmlReport {
+
+    [CmdletBinding()] param(
+        [object[]]$AllResults
+    )
+
+    $JavaScript = @"
+var cells = document.getElementsByTagName('td');
+
+for (var i=0; i<cells.length; i++) {
+    if (cells[i].innerHTML == "True") {
+        //cells[i].className = 'green';
+        cells[i].style.backgroundColor = '#00ff99';
+    } else if(cells[i].innerHTML == "False") {
+        //cells[i].className = 'red';
+        cells[i].style.backgroundColor = '#ff5050';
+    }
+}
+"@
+
+    $Css = @"
+    body{
+        font:1.2em normal Arial,sans-serif;
+        color:#34495E;
+      }
+      
+      h1{
+        text-align:center;
+        text-transform:uppercase;
+        letter-spacing:-2px;
+        font-size:2.5em;
+        margin:20px 0;
+      }
+      
+      table{
+        border-collapse:collapse;
+        width:100%;
+        border:2px solid #6699ff;
+      }
+      
+      th{
+        color:white;
+        background:#6699ff;
+        text-align:center;
+        padding:5px 0;
+      }
+
+      td{
+        text-align:center;
+        padding:5px 5px 5px 5px;
+      }
+
+      tbody td:nth-child(3){
+        text-align:left;
+      }
+
+      tbody td:nth-child(5){
+        white-space: pre;
+        margin: 1em 0px;
+        padding: .2rem .4rem;
+        font-size: 87.5%;
+        font-family: SFMono-Regular,Menlo,Monaco,Consolas,"Liberation Mono","Courier New",monospace;
+        //max-width: 40em;
+        //overflow: auto;
+        text-align:left;
+      }
+      
+      tbody tr:nth-child(even){
+        background:#ECF0F1;
+      }
+      
+      tbody tr:hover{
+      background:#BDC3C7;
+        color:#FFFFFF;
+      }
+      
+"@
+
+    $Html = @"
+<html>
+<head>
+<style>
+$($Css)
+</style>
+</head>
+<body>
+BODY_TO_REPLACE
+<script>
+$($JavaScript)
+</script>
+</body>
+</html>
+"@
+
+    $TableHtml = $AllResults | Where-Object { $_.Type -like "vuln" } | Sort-Object -Property Category | ConvertTo-Html -Property "Category","DisplayName","Note","Compliance","ResultRawString" -Fragment 
+    # $TableHtml = $AllResults | ConvertTo-Html -Property "Category","DisplayName","Note","Compliance","ResultRawString" -Fragment 
+    $Html = $Html.Replace("BODY_TO_REPLACE", $TableHtml)
+    $Html
 }
 
 function Invoke-AnalyzeResults {
@@ -6467,15 +6765,17 @@ function Invoke-AnalyzeResults {
     Write-Host "|                     VULNERABILITY REPORT                     |"
     Write-Host "+----+---------------------------------------------------------+"
 
-    $ResultArrayList | ForEach-Object {
+    $ResultArrayList | Sort-Object -Property Category | ForEach-Object {
 
         if ($_.Type -Like "vuln") {
 
             Write-Host -NoNewline "| "
             if ($_.ResultRaw) {
                 Write-Host -NoNewline -ForegroundColor "Red" "KO"
+                # $_ | Add-Member -MemberType "NoteProperty" -Name "Compliance" -Value $False
             } else {
                 Write-Host -NoNewline -ForegroundColor "Green" "OK"
+                # $_ | Add-Member -MemberType "NoteProperty" -Name "Compliance" -Value $True
             }
             Write-Host -NoNewline " |"
 
