@@ -1,3 +1,34 @@
+2021-06-13
+    - Group enumeration is now generic
+    - Added User > Invoke-UserRestrictedSidsCheck in case of WRITE RESTRICTED Tokens
+    - All privileges are now listed and the check is now considered "INFO"
+
+2021-06-01
+    - Group enumeration is now done using the Windows API
+
+2021-05-28
+    - Complete code refactor
+    - PrivescCheck no longer relies on compiled C# code (back to original PowerUp method)
+    - Code is now structured and split in "category" files
+    - Added a "Build" tool to slightly obfuscate the script
+    - LSA Protection and Credential Guard are now separate checks
+    - Fixed minor bugs
+
+2021-04-06
+    - Added Services > Invoke-SCMPermissionsCheck
+
+2020-10-29
+    - Refactored the report generation feature
+    - Refactored scheduled tasks check
+    - Added Scheduled Tasks > Invoke-ScheduledTasksUnquotedPathCheck
+
+2020-10-28
+    - Added an 'RunIfAdmin' mode. Some checks are now run even if the script is executed as an administrator.
+    - Added severity level to each check
+
+2020-10-27
+    - Added Config > Invoke-SccmCacheFolderVulnCheck
+
 2020-10-07
     - Additional custom checks can now be added as plugins
     - Added a "silent" mode (only the final vulnerability report is displayed)
